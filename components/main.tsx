@@ -68,7 +68,7 @@ const parseMultiSendData = (b) => {
   let txDatas = [];
   for (let i = 0; i < length; i++) {
     // address = operation byte + 20 address bytes
-    const to = tempBytes.slice(2, 42);
+    const to = "0x" + tempBytes.slice(2, 42);
 
     // value = operation byte + 20 address bytes + 32 value bytes
     const value = tempBytes.slice(42, 106);
@@ -79,7 +79,10 @@ const parseMultiSendData = (b) => {
 
     const data = tempBytes.slice(170, 170 + dataLengthFixed);
 
-    txDatas.push(abiDecoder.decodeMethod("0x" + data));
+    txDatas.push({
+      to,
+      decodedFunction: abiDecoder.decodeMethod("0x" + data),
+    });
 
     i += 170 + dataLengthFixed;
   }
@@ -110,7 +113,7 @@ const Main = () => {
         const to = mainTx.params[0].value.toLowerCase();
 
         // Extracts tx data
-        const extractFunctionData = (decodedFunction) => {
+        const extractFunctionData = (decodedFunction, targetAddress) => {
           if (specialFunctionNames.includes(decodedFunction.name)) {
             // target, value, signature, data, eta
             const signature = decodedFunction.params[2].value;
@@ -174,7 +177,7 @@ const Main = () => {
             ),
             to: (
               <Link color href={`https://etherscan.io/address/${to}`}>
-                {timelockNames[to]}
+                {timelockNames[targetAddress.toLowerCase()]}
               </Link>
             ),
             timestamp: moment(timestamp * 1000).from(Date.now()),
@@ -216,13 +219,17 @@ const Main = () => {
           const multisendData = mainTx.params[2].value.toLowerCase();
           const transactions =
             abiDecoder.decodeMethod(multisendData).params[0].value;
-          return parseMultiSendData(transactions).map((x) =>
-            extractFunctionData(x)
+          return parseMultiSendData(transactions).map(
+            ({ to, decodedFunction }) =>
+              extractFunctionData(decodedFunction, to)
           );
         }
 
         return [
-          extractFunctionData(abiDecoder.decodeMethod(mainTx.params[2].value)),
+          extractFunctionData(
+            abiDecoder.decodeMethod(mainTx.params[2].value),
+            to
+          ),
         ];
       })
       .reduce((acc, x) => [...acc, ...x], [])
