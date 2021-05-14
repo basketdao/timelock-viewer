@@ -21,14 +21,18 @@ import moment from "moment";
 import masterchefAbi from "./masterchef-abi.json";
 import timelockAbi from "./timelock-abi.json";
 import gnosisSafeAbi from "./gnosis-safe-abi.json";
+import multisendAbi from "./multisend-abi.json";
 
 const executingAddress = "0x2bF3cC8Fa6F067cc1741c7467C8Ee9F00e837757";
-const timelockAddresses = [
+const whitelistedAddresses = [
   "0xAFa2c40DF28768eaB8aDD6f2572B32A7F8c86a5E",
+  "0x8d29be29923b68abfdd21e541b9374737b49cdad",
 ].map((x) => x.toLowerCase());
 const timelockNames = {
   "0xafa2c40df28768eab8add6f2572b32a7f8c86a5e": "24 hour Timelock",
 };
+const multiSendAddress =
+  "0x8d29be29923b68abfdd21e541b9374737b49cdad".toLowerCase();
 const etherscanProvider = new ethers.providers.EtherscanProvider(
   1,
   "5V1DUNJRCKDD6WDZKEAQZDI2SZ5Z6IAQFJ"
@@ -41,6 +45,7 @@ const multicallProvider = new MulticallProvider(infuraProvider);
 abiDecoder.addABI(timelockAbi);
 abiDecoder.addABI(masterchefAbi);
 abiDecoder.addABI(gnosisSafeAbi);
+abiDecoder.addABI(multisendAbi);
 
 // Transactions to help decode
 // queueTransaction, cancelTransaction, executeTransaction
@@ -54,6 +59,32 @@ const specialFunctionNames = [
 const TARGET_ADDRESS_NAMES = {
   "0xdb9daa0a50b33e4fe9d0ac16a1df1d335f96595e": "Masterchef",
   "0x0309c98b1bffa350bcb3f9fb9780970ca32a5060": "BDPI",
+};
+
+const parseMultiSendData = (b) => {
+  const tempBytes = b.slice(2);
+
+  let length = tempBytes.length;
+  let txDatas = [];
+  for (let i = 0; i < length; i++) {
+    // address = operation byte + 20 address bytes
+    const to = tempBytes.slice(2, 42);
+
+    // value = operation byte + 20 address bytes + 32 value bytes
+    const value = tempBytes.slice(42, 106);
+
+    // dataLength = operation byte + 20 address bytes + 32 value bytes + 32 lengthBytes
+    const dataLength = tempBytes.slice(106, 170);
+    const dataLengthFixed = parseInt("0x" + dataLength) * 2;
+
+    const data = tempBytes.slice(170, 170 + dataLengthFixed);
+
+    txDatas.push(abiDecoder.decodeMethod("0x" + data));
+
+    i += 170 + dataLengthFixed;
+  }
+
+  return txDatas;
 };
 
 const Main = () => {
@@ -74,112 +105,127 @@ const Main = () => {
 
     const decoded = newest
       .map(({ data, from, blockNumber, timestamp, hash }) => {
-        const tx = abiDecoder.decodeMethod(data);
+        const mainTx = abiDecoder.decodeMethod(data);
 
-        const to = tx.params[0].value.toLowerCase();
+        const to = mainTx.params[0].value.toLowerCase();
 
-        // Only pay attention to timelock contract
-        if (!timelockAddresses.includes(to)) {
-          return null;
-        }
+        // Extracts tx data
+        const extractFunctionData = (decodedFunction) => {
+          if (specialFunctionNames.includes(decodedFunction.name)) {
+            // target, value, signature, data, eta
+            const signature = decodedFunction.params[2].value;
+            const data = decodedFunction.params[3].value;
 
-        // 2 is the data
-        const decodedFunction = abiDecoder.decodeMethod(tx.params[2].value);
+            const functionParams = signature
+              .split("(")[1]
+              .split(")")[0]
+              .split(",");
 
-        if (specialFunctionNames.includes(decodedFunction.name)) {
-          // target, value, signature, data, eta
-          const signature = decodedFunction.params[2].value;
-          const data = decodedFunction.params[3].value;
+            const decodedData = ethers.utils.defaultAbiCoder.decode(
+              functionParams,
+              data
+            );
 
-          const functionParams = signature
-            .split("(")[1]
-            .split(")")[0]
-            .split(",");
+            decodedFunction.params[3].value =
+              "[" + decodedData.map((x) => x.toString()).join(", ") + "]";
 
-          const decodedData = ethers.utils.defaultAbiCoder.decode(
-            functionParams,
-            data
-          );
-
-          decodedFunction.params[3].value =
-            "[" + decodedData.map((x) => x.toString()).join(", ") + "]";
-
-          decodedFunction.params[3].rawValue = data;
-        }
-
-        // ETA in human reable format
-        decodedFunction.params = decodedFunction.params.map((x) => {
-          if (x.name === "eta") {
-            const t = parseInt(x.value) * 1000;
-            const formattedTime = moment(t).from(now);
-
-            return {
-              ...x,
-              value: `${x.value} (${formattedTime})`,
-            };
+            decodedFunction.params[3].rawValue = data;
           }
 
-          return x;
-        });
+          // ETA in human reable format
+          decodedFunction.params = decodedFunction.params.map((x) => {
+            if (x.name === "eta") {
+              const t = parseInt(x.value) * 1000;
+              const formattedTime = moment(t).from(now);
 
-        // Target as a link
-        const rawTarget = decodedFunction.params[0].value;
-        let target = rawTarget.toLowerCase();
+              return {
+                ...x,
+                value: `${x.value} (${formattedTime})`,
+              };
+            }
 
-        if (TARGET_ADDRESS_NAMES[target]) {
-          target = (
-            <Link color href={`https://etherscan.io/address/${rawTarget}`}>
-              {TARGET_ADDRESS_NAMES[target]}
-            </Link>
+            return x;
+          });
+
+          // Target as a link
+          const rawTarget = decodedFunction.params[0].value;
+          let target = rawTarget.toLowerCase();
+
+          if (TARGET_ADDRESS_NAMES[target]) {
+            target = (
+              <Link color href={`https://etherscan.io/address/${rawTarget}`}>
+                {TARGET_ADDRESS_NAMES[target]}
+              </Link>
+            );
+          }
+
+          return {
+            hash,
+            decodedFunctionRaw: JSON.stringify(
+              decodedFunction.params.map((x) => {
+                return { k: x.name, v: x.value };
+              })
+            ),
+            txTypeRaw: decodedFunction.name,
+            txType: (
+              <Link color href={`https://etherscan.io/tx/${hash}`}>
+                {decodedFunction.name}
+              </Link>
+            ),
+            to: (
+              <Link color href={`https://etherscan.io/address/${to}`}>
+                {timelockNames[to]}
+              </Link>
+            ),
+            timestamp: moment(timestamp * 1000).from(Date.now()),
+            rawTarget,
+            target,
+            value: (
+              <Textarea
+                minHeight="1"
+                width="100%"
+                value={decodedFunction.params[1].value}
+              ></Textarea>
+            ),
+            signature: decodedFunction.params[2].value,
+            data: (
+              <Textarea
+                minHeight="3"
+                width="100%"
+                value={decodedFunction.params[3].value}
+              ></Textarea>
+            ),
+            rawData: (
+              <Textarea
+                minHeight="3"
+                width="100%"
+                value={decodedFunction.params[3].rawValue}
+              ></Textarea>
+            ),
+            eta: decodedFunction.params[4].value,
+          };
+        };
+
+        // Only pay attention to timelock contract
+        if (!whitelistedAddresses.includes(to)) {
+          return [null];
+        }
+
+        // If its multisend, we need to decode it again
+        if (to.toLowerCase() === multiSendAddress) {
+          const multisendData = mainTx.params[2].value.toLowerCase();
+          const transactions =
+            abiDecoder.decodeMethod(multisendData).params[0].value;
+          return parseMultiSendData(transactions).map((x) =>
+            extractFunctionData(x)
           );
         }
 
-        return {
-          hash,
-          decodedFunctionRaw: JSON.stringify(
-            decodedFunction.params.map((x) => {
-              return { k: x.name, v: x.value };
-            })
-          ),
-          txTypeRaw: decodedFunction.name,
-          txType: (
-            <Link color href={`https://etherscan.io/tx/${hash}`}>
-              {decodedFunction.name}
-            </Link>
-          ),
-          to: (
-            <Link color href={`https://etherscan.io/address/${to}`}>
-              {timelockNames[to]}
-            </Link>
-          ),
-          timestamp: moment(timestamp * 1000).from(Date.now()),
-          rawTarget,
-          target,
-          value: (
-            <Textarea
-              minHeight="1"
-              width="100%"
-              value={decodedFunction.params[1].value}
-            ></Textarea>
-          ),
-          signature: decodedFunction.params[2].value,
-          data: (
-            <Textarea
-              minHeight="3"
-              width="100%"
-              value={decodedFunction.params[3].value}
-            ></Textarea>
-          ),
-          rawData: (
-            <Textarea
-              minHeight="3"
-              width="100%"
-              value={decodedFunction.params[3].rawValue}
-            ></Textarea>
-          ),
-          eta: decodedFunction.params[4].value,
-        };
+        return [
+          extractFunctionData(abiDecoder.decodeMethod(mainTx.params[2].value)),
+        ];
       })
+      .reduce((acc, x) => [...acc, ...x], [])
       .filter((x) => x !== null);
 
     // Key: decodedFunctionRaw, Value: Hash
@@ -298,7 +344,7 @@ const Main = () => {
         , which is why it isn't showing up on the{" "}
         <Link
           color
-          href={`https://etherscan.io/address/${timelockAddresses[0]}`}
+          href={`https://etherscan.io/address/${whitelistedAddresses[0]}`}
         >
           timelock contract
         </Link>
