@@ -114,6 +114,10 @@ const Main = () => {
 
         // Extracts tx data
         const extractFunctionData = (decodedFunction, targetAddress) => {
+          if (!decodedFunction) {
+            return null
+          }
+
           if (specialFunctionNames.includes(decodedFunction.name)) {
             // target, value, signature, data, eta
             const signature = decodedFunction.params[2].value;
